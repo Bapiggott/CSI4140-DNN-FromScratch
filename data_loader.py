@@ -20,7 +20,7 @@ def get_cifar10_loaders(batch_size=128, augment=False):
         ]
     transform_list += [transforms.ToTensor()]
     transform = transforms.Compose(transform_list)
-
+git 
     # CIFAR-10 dataset
     train_dataset = torchvision.datasets.CIFAR10(
         root='./data',
