@@ -8,9 +8,7 @@ import time
 import wandb
 import torch.nn.functional as F
 
-##################################################
-# Custom dropout - do it ourselves for practice
-##################################################
+
 def custom_dropout(x, p=0.5, training=True):
     if not training or p == 0:
         return x
@@ -23,9 +21,7 @@ def custom_dropout(x, p=0.5, training=True):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Currently using device:", device)
 
-##################################################
-# A simpler exponential LR schedule
-##################################################
+
 class ExponentialLearningRateDecay:
     def __init__(self, initial_lr, decay_rate=0.98):
         self.initial_lr = initial_lr
@@ -35,9 +31,9 @@ class ExponentialLearningRateDecay:
         # decays by (rate^epoch)
         return self.initial_lr * (self.decay_rate ** epoch)
 
-##################################################
-# A manual Adam optimizer (no torch.optim)
-##################################################
+
+# manual Adam 
+
 class AdamOptimizer:
     def __init__(self, params, learning_rate=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
         self.params = params
@@ -64,9 +60,8 @@ class AdamOptimizer:
                 # param update
                 p -= self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
 
-##################################################
+
 # Simple fully-connected net w/ ReLU
-##################################################
 class FullyConnectedNN:
     def __init__(self, input_size, hidden_size, layers=1, learning_rate=0.001,
                  apply_activation_on_last=False, dropout=0.3):
@@ -145,9 +140,8 @@ class FullyConnectedNN:
             self.biases[i] = self.biases[i].to(device)
         return self
 
-##################################################
+
 # MaxPool w/ recorded indices
-##################################################
 class MaxPool:
     def __init__(self, kernel_size=2, stride=2):
         self.k = kernel_size
@@ -173,9 +167,8 @@ class MaxPool:
     def to(self, device):
         return self
 
-##################################################
+
 # Convolution via unfold/fold
-##################################################
 class ConvolutionNN:
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1,
                  learning_rate=0.001, dropout=0.3, use_batchnorm=False):
@@ -257,11 +250,8 @@ class ConvolutionNN:
             self.bn = self.bn.to(device)
         return self
 
-##################################################
-# Build a standard model (two conv blocks -> FCs)
-##################################################
-def build_architecture(arch_name, learning_rate=0.001, dropout=0.3):
-    # ignoring arch_name, we always return basically the same stack
+
+def build_architecture(learning_rate=0.001, dropout=0.3):
     convs = [
         ConvolutionNN(3, 128, 3, 1, 1, learning_rate, dropout),
         MaxPool(kernel_size=2, stride=2),
@@ -279,9 +269,8 @@ def build_architecture(arch_name, learning_rate=0.001, dropout=0.3):
     ]
     return convs, fcs
 
-##################################################
+
 # train function
-##################################################
 def train_arbitrary_modules(conv_layers, fc_layers, loader, device, optimizer, all_params, l2_lambda=1e-4):
     running_loss = 0.0
     correct = 0
@@ -353,9 +342,7 @@ def train_arbitrary_modules(conv_layers, fc_layers, loader, device, optimizer, a
     accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
-##################################################
 # Evaluate
-##################################################
 def evaluate_arbitrary_modules(conv_layers, fc_layers, loader, device, l2_lambda=1e-4):
     test_loss = 0.0
     correct = 0
@@ -411,9 +398,7 @@ def evaluate_arbitrary_modules(conv_layers, fc_layers, loader, device, l2_lambda
     accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
-##################################################
-# CIFAR-10 data loader
-##################################################
+# data loader
 def get_data_loaders(batch_size=64):
     transf_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -439,23 +424,20 @@ def get_data_loaders(batch_size=64):
     )
     return train_loader, test_loader
 
-##################################################
-# Main script - run a big training experiment
-##################################################
+# Main script
 if __name__ == '__main__':
     num_epochs = 150
     base_lr = 0.001
     opt_type = 'adam'
-    architecture = "WideCNN"
+    #architecture = "WideCNN"
     drop_val = 0.0
     results = {}
     successful_exps = {}
     batch = 2048
 
-    # we do a set of experiments w/ different batch sizes
     run_name = f"good_reLu_{drop_val}"
     wandb.init(project="CSI4140DNN", name=run_name, reinit=True, config={
-        "architecture": architecture,
+        #"architecture": architecture,
         "activation": "reLu",
         "dropout": drop_val,
         "learning_rate": base_lr,
@@ -463,10 +445,9 @@ if __name__ == '__main__':
         "num_epochs": num_epochs
     })
 
-    
 
     train_loader, test_loader = get_data_loaders(batch)
-    conv_mods, fc_mods = build_architecture(architecture, learning_rate=base_lr, dropout=drop_val)
+    conv_mods, fc_mods = build_architecture( learning_rate=base_lr, dropout=drop_val)
 
     # move to device
     for c in conv_mods:
@@ -535,13 +516,13 @@ if __name__ == '__main__':
             f"Ep Time: {ep_duration:.2f}s, Total: {total_elapsed:.2f}s"
         )
 
-    results[(architecture, "reLu", drop_val)] = {
+    """results[(architecture, "reLu", drop_val)] = {
         "train_losses": tr_losses,
         "train_accs": tr_accs,
         "test_losses": tst_losses,
         "test_accs": tst_accs,
         "batch_size": batch
-    }
+    }"""
 
     wandb.finish()
     print("Experiments that worked:", successful_exps)
