@@ -1,7 +1,7 @@
 import torch
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from tqdm import tqdm
 import math
 import time
@@ -9,15 +9,12 @@ import wandb
 import torch.nn.functional as F
 
 
-def custom_dropout(x, p=0.5, training=True):
+def dropout(x, p=0.5, training=True):
     if not training or p == 0:
         return x
-    # random mask
     mask = (torch.rand_like(x) > p).type_as(x)
-    # scale up the active neurons so overall scale is about the same
     return mask * x / (1.0 - p)
 
-# pick a device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Currently using device:", device)
 
@@ -28,19 +25,16 @@ class ExponentialLearningRateDecay:
         self.decay_rate = decay_rate
 
     def get_lr(self, epoch):
-        # decays by (rate^epoch)
         return self.initial_lr * (self.decay_rate ** epoch)
 
-
-# manual Adam 
 
 class AdamOptimizer:
     def __init__(self, params, learning_rate=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8):
         self.params = params
-        self.lr = learning_rate
+        self.learning_rate = learning_rate
         self.b1 = beta1
         self.b2 = beta2
-        self.eps = epsilon
+        self.epsilon = epsilon
         self.m = [torch.zeros_like(p) for p in params]
         self.v = [torch.zeros_like(p) for p in params]
         self.t = 0
@@ -58,13 +52,13 @@ class AdamOptimizer:
                 v_hat = self.v[i] / (1 - self.b2**self.t)
 
                 # param update
-                p -= self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
+                p -= self.learning_rate * m_hat / (torch.sqrt(v_hat) + self.epsilon)
 
 
-# Simple fully-connected net w/ ReLU
 class FullyConnectedNN:
     def __init__(self, input_size, hidden_size, layers=1, learning_rate=0.001,
                  apply_activation_on_last=False, dropout=0.3):
+        #self.learning_rate = learning_rate
         self.layers = layers
         self.apply_act_last = apply_activation_on_last
         self.dropout = dropout
@@ -73,7 +67,7 @@ class FullyConnectedNN:
         self.z = []
         self.a = []
 
-        # build each layer
+        # initialize weights
         for _ in range(layers):
             std = math.sqrt(2.0 / (input_size + hidden_size))
             w = torch.randn(hidden_size, input_size) * std
@@ -88,7 +82,7 @@ class FullyConnectedNN:
 
     def activate(self, x):
         # ReLU
-        return (x > 0).float() * x
+        return torch.clamp(x, min=0.0)
 
     def forward(self, x):
         if x.dim() > 2:
@@ -100,24 +94,24 @@ class FullyConnectedNN:
 
         out = x
         for i in range(self.layers):
-            z_val = out @ self.weights[i].T + self.biases[i].T
+            z = out @ self.weights[i].T + self.biases[i].T
             if i < self.layers - 1 or self.apply_act_last:
-                a_val = self.activate(z_val)
+                a = self.activate(z)
             else:
-                a_val = z_val
+                a = z
 
             # dropout on all but final layer
             if i < self.layers - 1 and self.dropout > 0:
-                a_val = custom_dropout(a_val, p=self.dropout, training=True)
+                a = dropout(a, p=self.dropout, training=True)
 
-            self.z[i] = z_val
-            self.a[i] = a_val
-            out = a_val
+            self.z[i] = z
+            self.a[i] = a
+            out = a
         return out
 
     def backward(self, grad_out):
         for i in reversed(range(self.layers)):
-            # derivative of ReLU if needed
+            # derivative of ReLU
             if i < self.layers - 1 or self.apply_act_last:
                 grad_out = grad_out * (self.z[i] > 0).float()
 
@@ -141,26 +135,25 @@ class FullyConnectedNN:
         return self
 
 
-# MaxPool w/ recorded indices
 class MaxPool:
     def __init__(self, kernel_size=2, stride=2):
-        self.k = kernel_size
-        self.s = stride
+        self.kernel_size = kernel_size
+        self.stride = stride
         self.x_shape = None
         self.indices = None
 
     def forward(self, x):
-        self.x = x  # Save the input for backward pass compatibility
+        self.x = x  # save for backprop
         self.x_shape = x.shape
-        out, self.indices = F.max_pool2d(x, kernel_size=self.k, stride=self.s, return_indices=True)
+        out, self.indices = F.max_pool2d(x, kernel_size=self.kernel_size, stride=self.stride, return_indices=True)
         return out
 
     def backward(self, grad_output):
         return F.max_unpool2d(
             grad_output,
             self.indices,
-            kernel_size=self.k,
-            stride=self.s,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
             output_size=self.x_shape
         )
 
@@ -168,17 +161,16 @@ class MaxPool:
         return self
 
 
-# Convolution via unfold/fold
 class ConvolutionNN:
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1,
-                 learning_rate=0.001, dropout=0.3, use_batchnorm=False):
-        self.in_ch = in_channels
-        self.out_ch = out_channels
-        self.k = kernel_size
+                 learning_rate=0.001, dropout=0.3):
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
         self.stride = stride
-        self.pad = padding
+        self.padding = padding
         self.dropout = dropout
-        self.use_bn = use_batchnorm
+        
 
         fan_in = in_channels * kernel_size * kernel_size
         fan_out = out_channels * kernel_size * kernel_size
@@ -187,8 +179,6 @@ class ConvolutionNN:
         self.W = torch.randn(out_channels, in_channels, kernel_size, kernel_size) * std
         self.b = torch.zeros(out_channels, 1)
 
-        if self.use_bn:
-            self.bn = torch.nn.BatchNorm2d(out_channels)
 
         self.x = None
         self.x_unfold = None
@@ -199,24 +189,22 @@ class ConvolutionNN:
         self.input_shape = x.shape
 
         B, C, H, W = x.shape
-        x_unfolded = F.unfold(x, kernel_size=self.k, padding=self.pad, stride=self.stride)
+        x_unfolded = F.unfold(x, kernel_size=self.kernel_size, padding=self.padding, stride=self.stride)
         self.x_unfold = x_unfolded
 
-        W2d = self.W.view(self.out_ch, -1)
+        W2d = self.W.view(self.out_channels, -1)
         out = W2d @ x_unfolded + self.b
-        H_out = (H + 2*self.pad - self.k)//self.stride + 1
-        W_out = (W + 2*self.pad - self.k)//self.stride + 1
-        out = out.view(B, self.out_ch, H_out, W_out)
+        h_out = (H + 2*self.padding - self.kernel_size)//self.stride + 1
+        w_out = (W + 2*self.padding - self.kernel_size)//self.stride + 1
+        out = out.view(B, self.out_channels, h_out, w_out)
 
-        if self.use_bn:
-            out = self.bn(out)
 
         if self.dropout > 0:
-            out = custom_dropout(out, p=self.dropout, training=True)
+            out = dropout(out, p=self.dropout, training=True)
         return out
 
     def backward(self, grad_output):
-        B, Cout, H_out, W_out = grad_output.shape
+        B, Cout, h_out, w_out = grad_output.shape
         grad_out_flat = grad_output.view(B, Cout, -1)
         W2d = self.W.view(Cout, -1)
         dW_2d = torch.zeros_like(W2d, device=grad_output.device)
@@ -236,7 +224,7 @@ class ConvolutionNN:
 
         in_shape = self.input_shape[2], self.input_shape[3]
         grad_input = F.fold(dx_unfold, output_size=in_shape,
-                            kernel_size=self.k, padding=self.pad,
+                            kernel_size=self.kernel_size, padding=self.padding,
                             stride=self.stride)
 
         self.W.grad = dW_2d.view_as(self.W)
@@ -246,12 +234,10 @@ class ConvolutionNN:
     def to(self, device):
         self.W = self.W.to(device)
         self.b = self.b.to(device)
-        if self.use_bn:
-            self.bn = self.bn.to(device)
         return self
 
 
-def build_architecture(learning_rate=0.001, dropout=0.3):
+def build(learning_rate=0.001, dropout=0.3):
     convs = [
         ConvolutionNN(3, 128, 3, 1, 1, learning_rate, dropout),
         MaxPool(kernel_size=2, stride=2),
@@ -271,13 +257,13 @@ def build_architecture(learning_rate=0.001, dropout=0.3):
 
 
 # train function
-def train_arbitrary_modules(conv_layers, fc_layers, loader, device, optimizer, all_params, l2_lambda=1e-4):
+def train(conv_layers, fc_layers, loader, device, optimizer, all_params, l2_lambda=1e-4):
     running_loss = 0.0
     correct = 0
     total = 0
 
-    for imgs, lbls in tqdm(loader, desc="Training", leave=False):
-        imgs, lbls = imgs.to(device), lbls.to(device)
+    for imgs, lables in tqdm(loader, desc="Training", leave=False):
+        imgs, lables = imgs.to(device), lables.to(device)
         b_size = imgs.size(0)
 
         # forward pass conv
@@ -286,22 +272,29 @@ def train_arbitrary_modules(conv_layers, fc_layers, loader, device, optimizer, a
             out = m.forward(out)
         conv_out_shape = out.shape  # Capture the final conv output shape
 
-        # flatten
         out = out.view(b_size, -1)
 
-        # forward pass fc
         for fc in fc_layers:
             out = fc.forward(out)
 
-        # cross entropy
+        
         logits = out
+        """p = torch.exp(logits)
+        p = p / p.sum(dim=1, keepdim=True)
+        one_hot = torch.zeros_like(p)
+        one_hot[range(b_size), b_size] = 1.0
+        loss = -(one_hot * p.log()).sum(dim=1).mean()
+        running_loss += loss.item()
+        dlogits = (p - one_hot) / b_size"""
+
+
         max_vals = logits.max(dim=1, keepdim=True)[0]
         stable_logits = logits - max_vals
         exp_val = torch.exp(stable_logits)
         p = exp_val / exp_val.sum(dim=1, keepdim=True)
 
         one_hot = torch.zeros_like(p)
-        one_hot[range(b_size), lbls] = 1.0
+        one_hot[range(b_size), lables] = 1.0
 
         log_p = torch.log(p + 1e-12)
         loss = -(one_hot * log_p).sum(dim=1).mean()
@@ -314,52 +307,52 @@ def train_arbitrary_modules(conv_layers, fc_layers, loader, device, optimizer, a
         # compute grad w.r.t. logits
         dlogits = (p - one_hot) / b_size
 
-        # backprop fc
-        grad_fc = dlogits
+        # Backward pass:
+        fc_gradient = dlogits
         for fc in reversed(fc_layers):
-            grad_fc = fc.backward(grad_fc)
-
-        # reshape for conv layers using the stored conv_out_shape
-        grad_conv = grad_fc.view(conv_out_shape)
-
-        # backprop conv
+            fc_gradient = fc.backward(fc_gradient)
+        grad_conv = fc_gradient.view(conv_out_shape)
         for c in reversed(conv_layers):
             grad_conv = c.backward(grad_conv)
 
-        # apply update
         optimizer.step()
 
-        # zero out .grad
         for param in all_params:
             param.grad = None
 
-        # track accuracy
         preds = logits.argmax(dim=1)
-        correct += (preds == lbls).sum().item()
-        total += lbls.size(0)
+        correct += (preds == lables).sum().item()
+        total += lables.size(0)
 
     avg_loss = running_loss / len(loader)
     accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
-# Evaluate
-def evaluate_arbitrary_modules(conv_layers, fc_layers, loader, device, l2_lambda=1e-4):
+def evaluate(conv_layers, fc_layers, loader, device, l2_lambda=1e-4):
     test_loss = 0.0
     correct = 0
     total = 0
 
     with torch.no_grad():
-        for imgs, lbls in loader:
-            imgs, lbls = imgs.to(device), lbls.to(device)
+        for imgs, lables in loader:
+            imgs, lables = imgs.to(device), lables.to(device)
             b_size = imgs.size(0)
 
             out = imgs
             for c in conv_layers:
                 out = c.forward(out)
-
-            out = out.view(b_size, -1)
+            out = out.view(b_size, -1) # flatten
             for fc in fc_layers:
                 out = fc.forward(out)
+
+            """logits = out
+            p = torch.exp(logits)
+            p = p / p.sum(dim=1, keepdim=True)
+            one_hot = torch.zeros_like(p)
+            one_hot[range(b_size), lables] = 1.0
+            loss = -(one_hot * p.log()).sum(dim=1).mean()
+            test_loss += loss.item()"""
+
 
             logits = out
             stable_part = logits - logits.max(dim=1, keepdim=True)[0]
@@ -367,7 +360,7 @@ def evaluate_arbitrary_modules(conv_layers, fc_layers, loader, device, l2_lambda
             p = e_lg / e_lg.sum(dim=1, keepdim=True)
 
             one_hot = torch.zeros_like(p)
-            one_hot[range(b_size), lbls] = 1.0
+            one_hot[range(b_size), lables] = 1.0
 
             log_p = torch.log(p + 1e-12)
             loss_val = -(one_hot * log_p).sum(dim=1).mean()
@@ -391,14 +384,24 @@ def evaluate_arbitrary_modules(conv_layers, fc_layers, loader, device, l2_lambda
             test_loss += loss_val.item()
 
             preds = logits.argmax(dim=1)
-            correct += (preds == lbls).sum().item()
-            total += lbls.size(0)
+            correct += (preds == lables).sum().item()
+            total += lables.size(0)
 
     avg_loss = test_loss / len(loader)
     accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
-# data loader
+def get_data_loaders1(batch_size=64):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+    train_dataset = datasets.CIFAR10(root='./data', train=True, transform=transform, download=True)
+    test_dataset  = datasets.CIFAR10(root='./data', train=False, transform=transform, download=True)
+    train_loader  = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    test_loader   = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    return train_loader, test_loader
+
 def get_data_loaders(batch_size=64):
     transf_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -429,13 +432,13 @@ if __name__ == '__main__':
     num_epochs = 150
     base_lr = 0.001
     opt_type = 'adam'
-    #architecture = "WideCNN"
+    #architecture = ""
     drop_val = 0.0
     results = {}
     successful_exps = {}
     batch = 2048
 
-    run_name = f"good_reLu_{drop_val}"
+    run_name = f"final"
     wandb.init(project="CSI4140DNN", name=run_name, reinit=True, config={
         #"architecture": architecture,
         "activation": "reLu",
@@ -447,7 +450,7 @@ if __name__ == '__main__':
 
 
     train_loader, test_loader = get_data_loaders(batch)
-    conv_mods, fc_mods = build_architecture( learning_rate=base_lr, dropout=drop_val)
+    conv_mods, fc_mods = build( learning_rate=base_lr, dropout=drop_val)
 
     # move to device
     for c in conv_mods:
@@ -455,7 +458,7 @@ if __name__ == '__main__':
     for f in fc_mods:
         f.to(device)
 
-    # gather parameters
+    # parameters
     all_params = []
     for c in conv_mods:
         if hasattr(c, 'W') and hasattr(c, 'b'):
@@ -466,54 +469,49 @@ if __name__ == '__main__':
                 all_params.append(f.weights[i])
                 all_params.append(f.biases[i])
 
-    # create Adam optimizer
+    # Adam optimizer
     optimizer = AdamOptimizer(all_params, learning_rate=base_lr)
 
-    # define an exponential lr schedule
     lr_sched = ExponentialLearningRateDecay(initial_lr=base_lr, decay_rate=0.98)
 
-    tr_losses, tr_accs = [], []
-    tst_losses, tst_accs = [], []
-    total_t0 = time.time()
+    train_losses, train_accs = [], []
+    test_losses, test_accs = [], []
+    start_time = time.time()
 
-    for ep in range(num_epochs):
-        ep_start = time.time()
-        # get new lr
-        optimizer.lr = lr_sched.get_lr(ep)
+    for epoch in range(num_epochs):
+        start_epoch = time.time()
+        # get new learning rate
+        optimizer.learning_rate = lr_sched.get_lr(epoch)
 
         # train
-        train_loss, train_acc = train_arbitrary_modules(
-            conv_mods, fc_mods, train_loader, device, optimizer, all_params
-        )
+        train_loss, train_acc = train(conv_mods, fc_mods, train_loader, device, optimizer, all_params)
 
-        # evaluate
-        test_loss, test_acc = evaluate_arbitrary_modules(
-            conv_mods, fc_mods, test_loader, device
-        )
+        # test
+        test_loss, test_acc = evaluate(conv_mods, fc_mods, test_loader, device)
 
-        ep_duration = time.time() - ep_start
-        total_elapsed = time.time() - total_t0
+        duration = time.time() - start_epoch
+        total_elapsed = time.time() - start_time
 
-        tr_losses.append(train_loss)
-        tr_accs.append(train_acc)
-        tst_losses.append(test_loss)
-        tst_accs.append(test_acc)
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        test_losses.append(test_loss)
+        test_accs.append(test_acc)
 
         wandb.log({
-            "epoch": ep + 1,
+            "epoch": epoch + 1,
             "train_loss": train_loss,
             "train_accuracy": train_acc,
             "test_loss": test_loss,
             "test_accuracy": test_acc,
-            "epoch_time_sec": ep_duration,
+            "epoch_time_sec": duration,
             "total_time_sec": total_elapsed
         })
 
         print(
-            f"Epoch [{ep+1}/{num_epochs}] "
+            f"Epoch [{epoch+1}/{num_epochs}] "
             f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | "
             f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}% | "
-            f"Ep Time: {ep_duration:.2f}s, Total: {total_elapsed:.2f}s"
+            f"Ep Time: {duration:.2f}s, Total: {total_elapsed:.2f}s"
         )
 
     """results[(architecture, "reLu", drop_val)] = {
@@ -525,4 +523,20 @@ if __name__ == '__main__':
     }"""
 
     wandb.finish()
-    print("Experiments that worked:", successful_exps)
+    """plt.figure()
+    plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss')
+    plt.plot(range(1, num_epochs+1), test_losses, label='Test Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Loss over Epochs')
+    plt.show()
+
+    plt.figure()
+    plt.plot(range(1, num_epochs+1), train_accs, label='Train Accuracy')
+    plt.plot(range(1, num_epochs+1), test_accs, label='Test Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.title('Accuracy over Epochs')
+    plt.show()"""
